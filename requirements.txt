@@ -1,3 +1,11 @@
+# Backend / БД
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+psycopg[binary]==3.2.*
+psycopg-pool==3.2.*
+pydantic==2.*
+
+# Парсеры (PDF / OCR)
 pymupdf
 pdfplumber
 pytesseract
