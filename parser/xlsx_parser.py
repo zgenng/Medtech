@@ -60,7 +60,6 @@ def parse_csv_excel(file_path: str) -> List[Dict[str, Union[str, float, None]]]:
     code_col = name_col = res_col = sng_col = nonres_col = None
     num_rows = df.shape[0]
     
-    # СТРАТЕГИЯ 1: 1,2,3,4,5,6,7,8 сандары бар жол
     for i in range(num_rows):
         row_vals = df.iloc[i].tolist()
         normalized_row = [normalize_cell_val(x) for x in row_vals]
@@ -84,7 +83,6 @@ def parse_csv_excel(file_path: str) -> List[Dict[str, Union[str, float, None]]]:
                     nonres_col = idx
             break
     
-    # СТРАТЕГИЯ 2: Мәтін арқылы іздеу
     if strategy is None:
         for i in range(num_rows):
             row_vals = df.iloc[i].tolist()
@@ -116,7 +114,7 @@ def parse_csv_excel(file_path: str) -> List[Dict[str, Union[str, float, None]]]:
         return []
     
     if name_col is None or res_col is None:
-        print(f"❌ Бағандар табылмады! name_col={name_col}, res_col={res_col}")
+        print(f"❌ Бағандар табылмады!")
         return []
     
     print(f"📊 Бағандар: code={code_col}, name={name_col}, res={res_col}, sng={sng_col}, nonres={nonres_col}")
@@ -152,7 +150,6 @@ def parse_csv_excel(file_path: str) -> List[Dict[str, Union[str, float, None]]]:
         else:
             price_nonresident = price_resident
         
-        # Егер барлық бағалар 0 болса, өткізіп жібер
         if price_resident == 0.0 and price_sng == 0.0 and price_nonresident == 0.0:
             continue
         
