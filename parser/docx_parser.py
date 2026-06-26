@@ -31,7 +31,6 @@ def parse_docx(file_path):
     results = []
     
     for table in doc.tables:
-        # Тақырып жолын ізде
         header_row = None
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells]
@@ -42,7 +41,6 @@ def parse_docx(file_path):
         if header_row is None:
             continue
         
-        # Бағандарды тап
         code_idx = None
         name_idx = None
         price_idx = None
@@ -59,7 +57,6 @@ def parse_docx(file_path):
         if name_idx is None or price_idx is None:
             continue
         
-        # Мәліметтерді оқу
         for row in table.rows[1:]:
             cells = [cell.text.strip() for cell in row.cells]
             if len(cells) <= max(name_idx, price_idx):
