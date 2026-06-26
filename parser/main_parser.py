@@ -1,6 +1,7 @@
 from xlsx_parser import parse_csv_excel
 from docx_parser import parse_docx
 import os
+import json
 
 def parse_file(file_path):
     """Файл типіне қарай парсерді шақырады"""
@@ -18,7 +19,6 @@ def parse_file(file_path):
 
 def save_results(results, output_file):
     """Нәтижені JSON файлына сақтайды"""
-    import json
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     print(f"✅ Нәтиже сақталды: {output_file}")
@@ -55,11 +55,11 @@ if __name__ == "__main__":
     # Нәтижені сақта
     save_results(all_results, 'parsed_results.json')
     
-    # Қысқаша статистика
+    # Статистика
+    with_code = sum(1 for x in all_results if x.get('service_code_source'))
+    with_sng = sum(1 for x in all_results if x.get('price_sng_kzt', 0) > 0)
+    
     print("\n📊 СТАТИСТИКА:")
     print(f"Барлығы: {len(all_results)} жол")
-    
-    # Кодтары бар жолдар
-    with_code = sum(1 for x in all_results if x.get('service_code_source'))
     print(f"Коды бар: {with_code} жол")
-    print(f"Коды жоқ: {len(all_results) - with_code} жол")
+    print(f"СНГ бағасы бар: {with_sng} жол")
