@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+import unicodedata
+from difflib import SequenceMatcher
 
 try:
     import fitz  # PyMuPDF
@@ -608,6 +610,765 @@ def row_to_price_item(
         "extraction_method": extraction_method,
     }
 
+# -----------------------------------------------------------------------------
+# Person 4: Medical service normalization and matching
+# -----------------------------------------------------------------------------
+
+AUTO_MATCH_THRESHOLD = 97
+REVIEW_MATCH_THRESHOLD = 85
+TOP_CANDIDATES_LIMIT = 5
+
+
+CONSULTATION_WORDS = {"прием", "приём", "консультация", "осмотр"}
+ECG_WORDS = {"экг", "холтер", "смад", "мониторирование", "электрокардиография"}
+ULTRASOUND_WORDS = {"узи", "эхокардиография", "эхокг"}
+REMOVAL_WORDS = {"удаление", "иссечение"}
+WASH_WORDS = {"промывание", "орошение", "вливание", "смазывание", "туалет"}
+ENDOSCOPY_WORDS = {"эндоскопия", "эндоскопическое"}
+LAB_WORDS = {"забор", "мазок", "соскоб", "анализ", "проба", "кровь", "моча"}
+XRAY_WORDS = {"рентген", "кт", "мрт", "томография"}
+PUNCTURE_WORDS = {"пункция", "блокада", "катетеризация", "тампонада", "вскрытие"}
+
+
+GENERIC_QUERIES = {
+    "осмотр",
+    "консультация",
+    "консультация второго",
+    "второго консультация",
+    "консультация врача",
+    "осмотр врача",
+}
+
+import unicodedata
+from difflib import SequenceMatcher
+
+try:
+    from rapidfuzz import fuzz
+except Exception:
+    fuzz = None
+
+
+@dataclass
+class ServiceRef:
+    service_id: str
+    service_name: str
+    specialty: Optional[str] = None
+    code: Optional[str] = None
+    tarificator_code: Optional[str] = None
+    synonyms: list[str] = field(default_factory=list)
+    is_active: bool = True
+
+
+@dataclass
+class MatchCandidate:
+    service_id: str
+    service_name: str
+    specialty: Optional[str]
+    code: Optional[str]
+    tarificator_code: Optional[str]
+    score: float
+    match_type: str
+    matched_by: str
+
+
+@dataclass
+class MatchResult:
+    status: str
+    service_id: Optional[str]
+    confidence: float
+    match_type: str
+    cleaned_query: str
+    normalized_query: str
+    candidates: list[MatchCandidate] = field(default_factory=list)
+
+
+BAD_SERVICE_PATTERNS = [
+    r"прилож\s*ение",
+    r"договор",
+    r"утверждаю",
+    r"директор",
+    r"страница",
+    r"прейскурант",
+    r"прайс",
+    r"медицинских услуг",
+    r"оказание медицинских услуг",
+    r"к договору",
+]
+
+
+MEDICAL_REPLACEMENTS = {
+    "прием": "консультация",
+    "приём": "консультация",
+    "консультативный": "консультация",
+    "врача": "",
+    "врач": "",
+
+    "акушер гинеколога": "акушер гинеколог",
+    "акушер-гинеколога": "акушер гинеколог",
+    "аллерголога": "аллерголог",
+    "дерматовенеролога": "дерматолог",
+    "дерматолога": "дерматолог",
+    "кардиолога": "кардиолог",
+    "трихолога": "трихолог",
+    "оториноларинголога": "лор",
+    "отоларинголога": "лор",
+    "лора": "лор",
+
+    "ультразвуковое исследование": "узи",
+    "ультра звуковое исследование": "узи",
+    "эхокардиография": "узи сердца",
+    "экг": "электрокардиография",
+    "холтер": "холтеровское мониторирование экг",
+    "суточное мониторирование экг": "холтеровское мониторирование экг",
+    "смад": "суточное мониторирование ад",
+    "дмад": "суточное мониторирование ад",
+
+    "к.м.н.": "кандидат медицинских наук",
+    "д.м.н.": "доктор медицинских наук",
+}
+
+
+def is_bad_service_name(value: Any) -> bool:
+    s = clean_cell(value).lower()
+    if not s:
+        return True
+    if len(s) < 3:
+        return True
+    if not re.search(r"[а-яa-z]", s):
+        return True
+
+    compact = re.sub(r"\s+", "", s)
+    if "приложение" in compact:
+        return True
+
+    for pattern in BAD_SERVICE_PATTERNS:
+        if re.search(pattern, s, flags=re.I):
+            return True
+
+    return False
+
+
+def clean_medical_service_name(value: Any) -> str:
+    if value is None:
+        return ""
+
+    s = str(value)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\xa0", " ")
+    s = s.replace("ё", "е")
+    s = re.sub(r"[•·'\"“”«»]+", " ", s)
+    s = re.sub(r"\.{2,}", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    s = s.strip(" ,;:.-—–")
+
+    if is_bad_service_name(s):
+        return ""
+
+    s = re.sub(r"^\d+(\s+\d+)*\s+", "", s)
+    s = re.sub(r"^[A-ZА-Я]{1,8}\s?\d[\w.\-/]*\s+", "", s, flags=re.I)
+
+    s = re.sub(r"\b\d{1,3}(?:[\s\xa0]\d{3})+\b", " ", s)
+    s = re.sub(r"\b\d{4,9}\b", " ", s)
+    s = re.sub(r"\b(?:тг|тенге|kzt|руб|rub|usd)\b", " ", s, flags=re.I)
+    s = re.sub(r"\s+[иi]\s+\d{3,6}$", "", s, flags=re.I)
+
+    s = re.sub(r"\s+", " ", s)
+    return s.strip(" ,;:.-—–")
+
+
+def normalize_service_text(value: Any) -> str:
+    s = clean_medical_service_name(value).lower()
+    if not s:
+        return ""
+
+    for old, new in sorted(MEDICAL_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+        s = s.replace(old, new)
+
+    s = re.sub(r"\([^)]*\)", " ", s)
+    s = re.sub(r"[^a-zа-я0-9]+", " ", s)
+    s = re.sub(r"\s+", " ", s)
+
+    stop_words = {
+        "услуга", "услуги", "медицинская", "медицинские",
+        "стоимость", "цена", "платная", "платные",
+        "для", "по", "на", "и", "или", "с", "без",
+        "один", "одна", "одно", "процедура", "штука", "шт",
+        "материала", "средств", "лекарственных",
+    }
+
+    tokens = [t for t in s.strip().split() if t not in stop_words]
+    tokens = sorted(set(tokens))
+    return " ".join(tokens)
+
+
+def safe_ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    if fuzz is not None:
+        return float(fuzz.WRatio(a, b))
+    return SequenceMatcher(None, a, b).ratio() * 100
+
+
+def service_type(text: Any) -> str:
+    n = normalize_service_text(text)
+    tokens = set(n.split())
+
+    if tokens & ECG_WORDS:
+        return "ecg"
+    if tokens & ULTRASOUND_WORDS:
+        return "ultrasound"
+    if tokens & REMOVAL_WORDS:
+        return "removal"
+    if tokens & ENDOSCOPY_WORDS:
+        return "endoscopy"
+    if tokens & WASH_WORDS:
+        return "wash"
+    if tokens & PUNCTURE_WORDS:
+        return "puncture"
+    if tokens & LAB_WORDS:
+        return "lab"
+    if tokens & XRAY_WORDS:
+        return "imaging"
+    if tokens & CONSULTATION_WORDS:
+        return "consultation"
+
+    return "other"
+
+
+def is_generic_query(query: str) -> bool:
+    q = clean_cell(query).lower()
+    tokens = q.split()
+
+    if q in GENERIC_QUERIES:
+        return True
+
+    if len(tokens) <= 1:
+        return True
+
+    if len(tokens) == 2 and ("консультация" in tokens or "осмотр" in tokens):
+        return True
+
+    return False
+
+
+def token_overlap(a: str, b: str) -> float:
+    a_tokens = set(a.split())
+    b_tokens = set(b.split())
+
+    if not a_tokens or not b_tokens:
+        return 0.0
+
+    return len(a_tokens & b_tokens) / max(len(a_tokens), len(b_tokens))
+
+
+def has_strong_medical_overlap(a: str, b: str) -> bool:
+    overlap = token_overlap(a, b)
+    if overlap >= 0.5:
+        return True
+
+    a_tokens = set(a.split())
+    b_tokens = set(b.split())
+
+    important = (
+        ECG_WORDS
+        | ULTRASOUND_WORDS
+        | REMOVAL_WORDS
+        | WASH_WORDS
+        | ENDOSCOPY_WORDS
+        | LAB_WORDS
+        | XRAY_WORDS
+        | PUNCTURE_WORDS
+    )
+
+    return bool((a_tokens & b_tokens) & important)
+
+class ServiceMatcher:
+    def __init__(
+        self,
+        services: list[ServiceRef],
+        *,
+        auto_threshold: int = AUTO_MATCH_THRESHOLD,
+        review_threshold: int = REVIEW_MATCH_THRESHOLD,
+    ) -> None:
+        self.services = [s for s in services if s.is_active]
+        self.auto_threshold = auto_threshold
+        self.review_threshold = review_threshold
+        self.variant_index: dict[str, tuple[ServiceRef, str]] = {}
+        self.variants: list[str] = []
+        self._build_indexes()
+
+    def _build_indexes(self) -> None:
+        self.variant_index.clear()
+        self.variants.clear()
+
+        for service in self.services:
+
+            variants = [service.service_name]
+            variants.extend(service.synonyms)
+
+            for raw_variant in variants:
+                variant = normalize_service_text(raw_variant)
+
+                if not variant:
+                    continue
+
+                source_type = (
+                    "official"
+                    if raw_variant == service.service_name
+                    else "generated"
+                )
+
+                self.variant_index[variant] = (service, source_type)
+                self.variants.append(variant)
+
+        self.variants = sorted(set(self.variants))
+
+    def match(self, raw_name: Any) -> MatchResult:
+        cleaned = clean_medical_service_name(raw_name)
+        query = normalize_service_text(cleaned)
+
+        if not query:
+            return MatchResult(
+                status="unmatched",
+                service_id=None,
+                confidence=0,
+                match_type="bad_or_empty",
+                cleaned_query=cleaned,
+                normalized_query="",
+                candidates=[],
+            )
+
+        if query in self.variant_index:
+            service, source_type = self.variant_index[query]
+            candidate = self._candidate(service, 100, f"exact_{source_type}", query)
+            return MatchResult(
+                status="matched",
+                service_id=service.service_id,
+                confidence=100,
+                match_type=f"exact_{source_type}",
+                cleaned_query=cleaned,
+                normalized_query=query,
+                candidates=[candidate],
+            )
+
+        candidates = self._get_candidates(query)
+
+        if not candidates:
+            return MatchResult(
+                status="unmatched",
+                service_id=None,
+                confidence=0,
+                match_type="no_candidates",
+                cleaned_query=cleaned,
+                normalized_query=query,
+                candidates=[],
+            )
+
+        best = candidates[0]
+
+        if best.score >= self.auto_threshold:
+            return MatchResult(
+                status="matched",
+                service_id=best.service_id,
+                confidence=best.score,
+                match_type=best.match_type,
+                cleaned_query=cleaned,
+                normalized_query=query,
+                candidates=candidates,
+            )
+
+        if best.score >= self.review_threshold:
+            return MatchResult(
+                status="needs_review",
+                service_id=None,
+                confidence=best.score,
+                match_type=best.match_type,
+                cleaned_query=cleaned,
+                normalized_query=query,
+                candidates=candidates,
+            )
+
+        return MatchResult(
+            status="unmatched",
+            service_id=None,
+            confidence=best.score,
+            match_type=best.match_type,
+            cleaned_query=cleaned,
+            normalized_query=query,
+            candidates=candidates,
+        )
+
+    def _get_candidates(self, query: str) -> list[MatchCandidate]:
+        scored: list[MatchCandidate] = []
+
+        for variant in self.variants:
+            service, source_type = self.variant_index[variant]
+
+            base_score = safe_ratio(query, variant)
+            bonus = self._token_bonus(query, variant)
+            final_score = min(100.0, base_score + bonus)
+
+            if final_score < self.review_threshold - 12:
+                continue
+
+            scored.append(
+                self._candidate(
+                    service=service,
+                    score=round(final_score, 2),
+                    match_type=f"fuzzy_{source_type}",
+                    matched_by=variant,
+                )
+            )
+
+        scored.sort(key=lambda x: x.score, reverse=True)
+
+        unique: list[MatchCandidate] = []
+        seen: set[str] = set()
+
+        for candidate in scored:
+            if candidate.service_id in seen:
+                continue
+            seen.add(candidate.service_id)
+            unique.append(candidate)
+            if len(unique) >= TOP_CANDIDATES_LIMIT:
+                break
+
+        return unique
+
+    @staticmethod
+    def _token_bonus(a: str, b: str) -> float:
+        a_tokens = set(a.split())
+        b_tokens = set(b.split())
+        if not a_tokens or not b_tokens:
+            return 0.0
+
+        overlap = len(a_tokens & b_tokens) / max(len(a_tokens), len(b_tokens))
+
+        if overlap >= 0.85:
+            return 10.0
+        if overlap >= 0.65:
+            return 7.0
+        if overlap >= 0.45:
+            return 4.0
+        if overlap >= 0.30:
+            return 2.0
+        return 0.0
+
+    @staticmethod
+    def _candidate(
+        service: ServiceRef,
+        score: float,
+        match_type: str,
+        matched_by: str,
+    ) -> MatchCandidate:
+        return MatchCandidate(
+            service_id=service.service_id,
+            service_name=service.service_name,
+            specialty=service.specialty,
+            code=service.code,
+            tarificator_code=service.tarificator_code,
+            score=round(score, 2),
+            match_type=match_type,
+            matched_by=matched_by,
+        )
+
+def is_ref_broken(value: Any) -> bool:
+    return clean_cell(value).upper() in {"#REF!", "#N/A", "#VALUE!", ""}
+
+
+def is_consultation_service(name: str) -> bool:
+    n = clean_cell(name).lower()
+    return any(x in n for x in ["прием", "приём", "консультация", "осмотр"])
+
+def load_services_from_xlsx(path: str | Path) -> list[ServiceRef]:
+    try:
+        import openpyxl
+    except Exception:
+        raise RuntimeError("openpyxl is not installed. Install: pip install openpyxl")
+
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+
+    if not rows:
+        return []
+
+    header_idx = 0
+    for i, row in enumerate(rows[:20]):
+        joined = " ".join(clean_cell(c).lower() for c in row)
+        if "name_ru" in joined or "специальность" in joined or "tarificatr" in joined:
+            header_idx = i
+            break
+
+    headers = [clean_cell(x).lower() for x in rows[header_idx]]
+    services: list[ServiceRef] = []
+
+    for row in rows[header_idx + 1:]:
+        item = {key: value for key, value in zip(headers, row)}
+
+        raw_id = item.get("id")
+        specialty = clean_cell(item.get("специальность"))
+        code = clean_cell(item.get("code"))
+        name_ru = clean_cell(item.get("name_ru"))
+        tarificator = (
+            item.get("tarificatrсode")
+            or item.get("tarificatorcode")
+            or item.get("tarificatrcode")
+            or item.get("tarificatr_code")
+            or item.get("tarificatr code")
+        )
+
+        service_id = clean_cell(raw_id) or code or name_ru
+
+        if not name_ru:
+            continue
+
+        if is_ref_broken(service_id) or is_ref_broken(code) or is_ref_broken(name_ru):
+            continue
+
+        synonyms = generate_medical_synonyms(name_ru, specialty)
+
+        services.append(
+            ServiceRef(
+                service_id=service_id,
+                service_name=name_ru,
+                specialty=specialty or None,
+                code=code or None,
+                tarificator_code=clean_cell(tarificator) or None,
+                synonyms=synonyms,
+                is_active=True,
+            )
+        )
+
+    return services
+
+
+
+def load_services_from_json(path: str | Path) -> list[ServiceRef]:
+    path = Path(path)
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        data = data.get("services", [])
+
+    services: list[ServiceRef] = []
+
+    for row in data:
+        service_name = clean_cell(
+            row.get("Name_ru")
+            or row.get("name_ru")
+            or row.get("service_name")
+            or row.get("name")
+        )
+        specialty = clean_cell(row.get("Специальность") or row.get("specialty"))
+        code = clean_cell(row.get("Code") or row.get("code"))
+        service_id = clean_cell(row.get("ID") or row.get("id")) or code or service_name
+        tarificator = clean_cell(
+            row.get("TarificatrCode")
+            or row.get("tarificatr_code")
+            or row.get("tarificator_code")
+        )
+
+        if not service_name:
+            continue
+
+        synonyms = row.get("synonyms") or []
+        if isinstance(synonyms, str):
+            synonyms = re.split(r"[,;|]\s*", synonyms)
+
+        synonyms = [clean_cell(x) for x in synonyms if clean_cell(x)]
+        synonyms.extend(generate_medical_synonyms(service_name, specialty))
+
+        services.append(
+            ServiceRef(
+                service_id=service_id,
+                service_name=service_name,
+                specialty=specialty or None,
+                code=code or None,
+                tarificator_code=tarificator or None,
+                synonyms=sorted(set(synonyms)),
+                is_active=True,
+            )
+        )
+
+    return services
+
+
+def load_services(path: str | Path) -> list[ServiceRef]:
+    path = Path(path)
+
+    if path.suffix.lower() == ".json":
+        return load_services_from_json(path)
+
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return load_services_from_xlsx(path)
+
+    raise ValueError(f"Unsupported service dictionary format: {path.suffix}")
+
+
+def generate_medical_synonyms(service_name: str, specialty: str = "") -> list[str]:
+    name = clean_cell(service_name)
+    spec = clean_cell(specialty)
+    result = set()
+
+    if name:
+        result.add(name)
+
+    if is_consultation_service(name):
+        rest = name
+        rest = re.sub(r"(?i)^при[её]м\s+", "", rest).strip()
+        rest = re.sub(r"(?i)^консультация\s+", "", rest).strip()
+        rest = re.sub(r"(?i)^врача\s+", "", rest).strip()
+
+        result.add(f"прием {rest}")
+        result.add(f"приём {rest}")
+        result.add(f"прием врача {rest}")
+        result.add(f"приём врача {rest}")
+        result.add(f"консультация {rest}")
+        result.add(f"консультация врача {rest}")
+
+        if spec:
+            result.add(f"прием {spec}")
+            result.add(f"приём {spec}")
+            result.add(f"прием врача {spec}")
+            result.add(f"приём врача {spec}")
+            result.add(f"консультация {spec}")
+            result.add(f"консультация врача {spec}")
+
+    low = name.lower()
+
+    if "эхокардиография" in low or "узи сердца" in low:
+        result.add("УЗИ сердца")
+        result.add("ЭхоКГ")
+        result.add("ЭхоКГ с допплерографией")
+        result.add("Эхокардиография с допплерографией")
+
+    if "холтер" in low or "мониторирование экг" in low:
+        result.add("Холтер ЭКГ")
+        result.add("Суточное мониторирование ЭКГ")
+        result.add("Холтеровское мониторирование ЭКГ")
+
+    if "суточное мониторирование ад" in low or "смад" in low:
+        result.add("СМАД")
+        result.add("Мониторирование АД")
+        result.add("Суточное мониторирование артериального давления")
+
+    if "экг" in low or "электрокардиография" in low:
+        result.add("ЭКГ")
+        result.add("Электрокардиография")
+
+    return sorted(x for x in result if clean_cell(x))
+
+
+def match_price_items(
+    items: list[dict[str, Any]],
+    services: list[ServiceRef],
+    *,
+    auto_threshold: int = AUTO_MATCH_THRESHOLD,
+    review_threshold: int = REVIEW_MATCH_THRESHOLD,
+) -> dict[str, Any]:
+    matcher = ServiceMatcher(
+        services,
+        auto_threshold=auto_threshold,
+        review_threshold=review_threshold,
+    )
+
+    matched_items: list[dict[str, Any]] = []
+    review_items: list[dict[str, Any]] = []
+    unmatched_items: list[dict[str, Any]] = []
+
+    for item in items:
+        result = matcher.match(item.get("service_name_raw"))
+
+        enriched = dict(item)
+        enriched["service_name_clean"] = result.cleaned_query
+        enriched["normalized_service_name"] = result.normalized_query
+        enriched["match_status"] = result.status
+        enriched["match_confidence"] = result.confidence
+        enriched["match_type"] = result.match_type
+        enriched["match_candidates"] = [asdict(c) for c in result.candidates]
+
+        if result.status == "matched":
+            enriched["service_id"] = result.service_id
+            enriched["is_verified"] = result.confidence >= 95
+            enriched["verification_note"] = "auto matched"
+            matched_items.append(enriched)
+
+        elif result.status == "needs_review":
+            enriched["service_id"] = None
+            enriched["is_verified"] = False
+            enriched["parse_status"] = "needs_review"
+            enriched["verification_note"] = "needs manual confirmation"
+            review_items.append(enriched)
+
+        else:
+            enriched["service_id"] = None
+            enriched["is_verified"] = False
+            enriched["parse_status"] = "needs_review"
+            enriched["verification_note"] = "unmatched service"
+            unmatched_items.append(enriched)
+
+    total = len(items)
+    matched_count = len(matched_items)
+    review_count = len(review_items)
+    unmatched_count = len(unmatched_items)
+
+    summary = {
+        "total_items": total,
+        "matched_items": matched_count,
+        "needs_review_items": review_count,
+        "unmatched_items": unmatched_count,
+        "auto_match_percent": round((matched_count / total) * 100, 2) if total else 0,
+        "review_percent": round((review_count / total) * 100, 2) if total else 0,
+        "unmatched_percent": round((unmatched_count / total) * 100, 2) if total else 0,
+        "auto_threshold": auto_threshold,
+        "review_threshold": review_threshold,
+        "services_count": len(services),
+        "created_at": now_iso(),
+    }
+
+    return {
+        "items": matched_items + review_items + unmatched_items,
+        "matched": matched_items,
+        "needs_review": review_items,
+        "unmatched": unmatched_items,
+        "summary": summary,
+    }
+
+
+def match_archive_result(
+    parser_result: dict[str, Any],
+    service_dictionary_path: str | Path,
+    *,
+    auto_threshold: int = AUTO_MATCH_THRESHOLD,
+    review_threshold: int = REVIEW_MATCH_THRESHOLD,
+) -> dict[str, Any]:
+    services = load_services(service_dictionary_path)
+    items = parser_result.get("items", [])
+
+    matching_result = match_price_items(
+        items,
+        services,
+        auto_threshold=auto_threshold,
+        review_threshold=review_threshold,
+    )
+
+    return {
+        "items": matching_result["items"],
+        "matched": matching_result["matched"],
+        "needs_review": matching_result["needs_review"],
+        "unmatched": matching_result["unmatched"],
+        "jobs": parser_result.get("jobs", []),
+        "parser_summary": parser_result.get("summary", {}),
+        "matching_summary": matching_result["summary"],
+    }
+
+
+def save_matching_result(result: dict[str, Any], out_path: str | Path) -> None:
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
 
 # -----------------------------------------------------------------------------
 # Worker orchestration
@@ -708,6 +1469,7 @@ def main() -> None:
     arg_parser = argparse.ArgumentParser(description="Person 2 PDF/OCR worker for MedArchive")
     arg_parser.add_argument("zip_path", help="Path to ZIP archive")
     arg_parser.add_argument("--out", default="person2_pdf_ocr_result.json", help="Output JSON path")
+    arg_parser.add_argument("--services", default=None, help="Path to service dictionary JSON/XLSX")
     arg_parser.add_argument("--no-ocr", action="store_true", help="Disable OCR fallback")
     arg_parser.add_argument("--ocr-max-pages", type=int, default=None, help="Limit OCR pages per scanned PDF for fast demo")
     args = arg_parser.parse_args()
@@ -717,11 +1479,17 @@ def main() -> None:
         enable_ocr=not args.no_ocr,
         ocr_max_pages=args.ocr_max_pages,
     )
+    if args.services:
+        result = match_archive_result(result, args.services)
+
 
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
+    if "matching_summary" in result:
+        print(json.dumps(result["matching_summary"], ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
     print(f"Saved result to {args.out}")
 
 
