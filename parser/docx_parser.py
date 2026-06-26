@@ -84,22 +84,3 @@ def parse_docx(file_path):
             })
     
     return results
-
-if __name__ == "__main__":
-    print("=" * 50)
-    print("DOCX ПАРСЕР ТЕСТІ")
-    print("=" * 50)
-    
-    results = parse_docx('Клиника 1 прайс 2024.docx')
-    
-    print(f"\n📊 Барлығы {len(results)} жол табылды")
-    
-    if results:
-        print("\n📋 АЛҒАШҚЫ 5 ЖОЛ:")
-        for idx, item in enumerate(results[:5], 1):
-            print(f"{idx}. {item['service_name_raw'][:40]}...")
-            print(f"   Код: {item['service_code_source']}")
-            print(f"   Баға: {item['price_resident_kzt']}")
-            print()
-    else:
-        print("\n⚠️ ЕШҚАНДАЙ МӘЛІМЕТ ТАБЫЛМАДЫ!")
