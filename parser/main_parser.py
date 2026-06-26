@@ -4,7 +4,6 @@ import os
 import json
 
 def parse_file(file_path):
-    """Файл типіне қарай парсерді шақырады"""
     if not os.path.exists(file_path):
         print(f"❌ Файл жоқ: {file_path}")
         return []
@@ -18,7 +17,6 @@ def parse_file(file_path):
         return []
 
 def save_results(results, output_file):
-    """Нәтижені JSON файлына сақтайды"""
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     print(f"✅ Нәтиже сақталды: {output_file}")
@@ -52,10 +50,8 @@ if __name__ == "__main__":
     print(f"📊 БАРЛЫҒЫ {len(all_results)} ЖОЛ ТАБЫЛДЫ")
     print("=" * 60)
     
-    # Нәтижені сақта
     save_results(all_results, 'parsed_results.json')
     
-    # Статистика
     with_code = sum(1 for x in all_results if x.get('service_code_source'))
     with_sng = sum(1 for x in all_results if x.get('price_sng_kzt', 0) > 0)
     
