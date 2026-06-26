@@ -31,6 +31,7 @@ def parse_docx(file_path):
     results = []
     
     for table in doc.tables:
+        # Тақырып жолын ізде
         header_row = None
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells]
@@ -41,6 +42,7 @@ def parse_docx(file_path):
         if header_row is None:
             continue
         
+        # Бағандарды тап
         code_idx = None
         name_idx = None
         price_idx = None
@@ -57,6 +59,7 @@ def parse_docx(file_path):
         if name_idx is None or price_idx is None:
             continue
         
+        # Мәліметтерді оқу
         for row in table.rows[1:]:
             cells = [cell.text.strip() for cell in row.cells]
             if len(cells) <= max(name_idx, price_idx):
@@ -81,3 +84,22 @@ def parse_docx(file_path):
             })
     
     return results
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("DOCX ПАРСЕР ТЕСТІ")
+    print("=" * 50)
+    
+    results = parse_docx('Клиника 1 прайс 2024.docx')
+    
+    print(f"\n📊 Барлығы {len(results)} жол табылды")
+    
+    if results:
+        print("\n📋 АЛҒАШҚЫ 5 ЖОЛ:")
+        for idx, item in enumerate(results[:5], 1):
+            print(f"{idx}. {item['service_name_raw'][:40]}...")
+            print(f"   Код: {item['service_code_source']}")
+            print(f"   Баға: {item['price_resident_kzt']}")
+            print()
+    else:
+        print("\n⚠️ ЕШҚАНДАЙ МӘЛІМЕТ ТАБЫЛМАДЫ!")
