@@ -55,6 +55,12 @@ class PriceItem:
     source_row: int | None = None
     source_sheet: str | None = None
     item_id: str = field(default_factory=new_id)
+    service_id: str | None = None
+    match_confidence: float | None = None
+    match_status: str | None = None
+    match_method: str | None = None
+    is_verified: bool = False
+    verification_note: str | None = None
 
 
 @dataclass(slots=True)
