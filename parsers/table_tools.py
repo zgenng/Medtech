@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from models import PriceDocument, PriceItem
+from utils.currency import detect_currency
 from utils.prices import parse_money
 from utils.text import clean_text, is_noise, looks_like_section, normalize_key
 
@@ -15,6 +16,7 @@ class ColumnMap:
     resident: int | None = None
     nonresident: int | None = None
     original: int | None = None
+    currency: str | None = None   # валюта прайса, угаданная по заголовкам колонок
 
 
 def find_header_index(rows: list[list[object]], max_scan: int = 80) -> int | None:
@@ -32,6 +34,7 @@ def build_column_map(rows: list[list[object]], header_index: int) -> ColumnMap:
         resident=_find_price_col(headers, ["резидент", "республики казахстан", "рк", "страхов"]),
         nonresident=_find_price_col(headers, ["нерезидент", "снг", "дальнего", "зарубежья"]),
         original=_find_price_col(headers, ["цена", "стоимость", "тариф"]),
+        currency=detect_currency(*headers),
     )
 
 
@@ -63,6 +66,7 @@ def row_to_item(
     prices = _row_prices(row, columns)
     if not any(prices):
         return None
+    currency = columns.currency or detect_currency(*row) or "KZT"
     return PriceItem(
         doc_id=document.doc_id,
         partner_id=document.partner_id,
@@ -71,7 +75,7 @@ def row_to_item(
         price_resident_kzt=prices[0],
         price_nonresident_kzt=prices[1],
         price_original=prices[2] or prices[0] or prices[1],
-        currency_original="KZT",
+        currency_original=currency,
         effective_date=document.effective_date,
         source_row=row_number,
         source_sheet=sheet_name,

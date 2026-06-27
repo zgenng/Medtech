@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from models import PriceDocument, PriceItem
+from utils.currency import detect_currency
 from utils.prices import split_trailing_prices
 from utils.text import clean_text, is_noise, looks_like_section
 
@@ -28,10 +29,11 @@ def _consume_line(raw_line: str, pending: str, document: PriceDocument) -> tuple
     if not prices:
         return _join_text(pending, line), None
     full_name = _join_text(pending, name)
-    return "", _make_item(full_name, prices, document)
+    currency = detect_currency(line) or "KZT"
+    return "", _make_item(full_name, prices, document, currency)
 
 
-def _make_item(name: str, prices, document: PriceDocument) -> PriceItem | None:
+def _make_item(name: str, prices, document: PriceDocument, currency: str = "KZT") -> PriceItem | None:
     code, service_name = _split_code(name)
     if len(service_name) < 3:
         return None
@@ -45,7 +47,7 @@ def _make_item(name: str, prices, document: PriceDocument) -> PriceItem | None:
         price_resident_kzt=resident,
         price_nonresident_kzt=nonresident,
         price_original=resident,
-        currency_original="KZT",
+        currency_original=currency,
         effective_date=document.effective_date,
     )
 

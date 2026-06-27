@@ -6,6 +6,7 @@ from pathlib import Path
 from config import ParserConfig
 from models import Partner, ParseResult
 from parsers.factory import ParserFactory
+from utils.currency import apply_currency_conversion
 from utils.files import guess_partner_name, list_supported_files, safe_extract_zip
 from validation import validate_items
 
@@ -34,6 +35,8 @@ class ArchiveParser:
         except Exception as error:
             result = self._error_result(path, partner, error)
         result.document.file_path = str(path)
+        # Конвертация валют до валидации: дальше всё считаем в KZT, оригинал сохранён.
+        result.warnings.extend(apply_currency_conversion(result.items, self.config.currency_rates))
         result.warnings.extend(validate_items(result.items))
         return result.finalize()
 

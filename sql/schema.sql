@@ -108,14 +108,18 @@ CREATE INDEX IF NOT EXISTS idx_service_name_trgm ON service USING gin (service_n
 CREATE INDEX IF NOT EXISTS idx_partner_city   ON partner(city);
 
 -- ============================================================
--- Уникальность для дедупликации позиций
--- (та же клиника + та же услуга + та же дата = дубликат)
+-- Версионирование цен (ТЗ 4.4 / 5)
 -- ============================================================
--- COALESCE-сентинел: позиции без даты (effective_date IS NULL) тоже дедуплицируются
--- (обычный UNIQUE считает NULL != NULL и плодил бы дубли при повторном прогоне).
-CREATE UNIQUE INDEX IF NOT EXISTS uq_item_dedup
-    ON price_item(partner_id, service_name_raw, (COALESCE(effective_date, DATE '0001-01-01')))
+-- Одна активная (актуальная) версия услуги у партнёра. Прошлые цены остаются
+-- строками is_active=FALSE (история не удаляется). Загрузчик при новой цене
+-- архивирует старую активную версию и вставляет новую (см. repository.py).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_item_active
+    ON price_item(partner_id, service_name_raw)
     WHERE is_active = TRUE;
+
+-- Поиск конкретной версии (идемпотентная перезагрузка, построение истории).
+CREATE INDEX IF NOT EXISTS idx_item_version
+    ON price_item(partner_id, service_name_raw, (COALESCE(effective_date, DATE '0001-01-01')));
 
 -- Идемпотентность документа: один файл одной клиники = один price_document.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_document_file

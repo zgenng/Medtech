@@ -3,11 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from models import Partner, ParseResult
 from parsers.base import BaseParser
 from parsers.table_tools import build_column_map, find_header_index, rows_to_items
 from utils.text import clean_text
+
+# Теги ревизий Word. Вставки/перемещения-в принимаем (текст остаётся),
+# удаления/перемещения-из выкидываем (работаем с финальной версией).
+_REVISION_KEEP = (qn("w:ins"), qn("w:moveTo"))
+_REVISION_DROP = (qn("w:del"), qn("w:moveFrom"))
 
 
 class DocxParser(BaseParser):
@@ -18,6 +24,10 @@ class DocxParser(BaseParser):
         document = self.make_document(path, partner)
         result = ParseResult(document=document)
         doc = Document(path)
+        try:
+            _accept_tracked_changes(doc)
+        except Exception as error:  # noqa: BLE001 — правка ревизий не должна валить парсинг
+            result.warnings.append(f"tracked-changes accept skipped: {error}")
         result.document.raw_content = self._extract_raw_text(doc)
         for table in doc.tables:
             result.items.extend(self._parse_table(table, document))
@@ -41,3 +51,28 @@ class DocxParser(BaseParser):
             for row in table.rows:
                 table_rows.append(" | ".join(clean_text(cell.text) for cell in row.cells))
         return "\n".join(paragraphs + table_rows[:500])
+
+
+def _accept_tracked_changes(doc: Document) -> None:
+    """Принять все отслеживаемые изменения (ТЗ 4.2).
+
+    python-docx читает только прямые ``w:r`` параграфа и не разворачивает
+    ревизии: вставленный текст внутри ``w:ins`` теряется, удалённый внутри
+    ``w:del`` может попадать в вывод. Правим XML дерева: удаления выкидываем,
+    вставки «разворачиваем» — переносим их содержимое на место самого тега.
+    """
+    root = doc.element
+    for tag in _REVISION_DROP:
+        for element in list(root.iter(tag)):
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+    for tag in _REVISION_KEEP:
+        for element in list(root.iter(tag)):
+            parent = element.getparent()
+            if parent is None:
+                continue
+            index = list(parent).index(element)
+            for child in reversed(list(element)):
+                parent.insert(index, child)
+            parent.remove(element)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from decimal import Decimal
 from typing import Any, Iterable, Iterator
 
 
@@ -143,12 +144,9 @@ _ITEM_COLUMNS = (
     "is_active",
 )
 
-# ON CONFLICT целится в uq_item_dedup: выражение и предикат должны совпадать
-# с индексом из миграции 001 (COALESCE делает NULL-даты дедуплицируемыми).
-_ITEM_CONFLICT = (
-    "(partner_id, service_name_raw, (COALESCE(effective_date, DATE '0001-01-01'))) "
-    "WHERE is_active = TRUE"
-)
+# Порог ценовой аномалии (ТЗ 4.4): изменение цены > 50% относительно предыдущей
+# версии → флаг для ручного подтверждения.
+_ANOMALY_THRESHOLD = Decimal("0.5")
 
 
 def _upsert_partner(cur, partner) -> str:
@@ -225,25 +223,137 @@ def _insert_document(cur, document, partner_id: str) -> str:
 
 
 def _bulk_insert_items(cur, items) -> int:
-    """Вставка позиций с ON CONFLICT DO NOTHING (uq_item_dedup). Возвращает число
-    реально вставленных строк (дубликаты пропускаются и не учитываются).
+    """Вставка позиций с версионированием цен (ТЗ 4.4/5). Возвращает число
+    реально вставленных строк (идемпотентные дубли пропускаются).
 
-    DO NOTHING достаточно для идемпотентности. Версионирование цен (ТЗ 4.4)
-    заменит эту стратегию на архивирование старой версии — точка расширения.
+    На позицию:
+      * точно такая же версия (та же дата и цены) уже есть → пропуск (идемпотентность);
+      * активной версии услуги нет → вставка как активной;
+      * пришла более новая (или равная по дате) цена → старую активную архивируем
+        (is_active=FALSE, история не удаляется), новую делаем активной; при
+        изменении > 50% ставим флаг ценовой аномалии на ручное подтверждение;
+      * пришёл более старый прайс → кладём в историю (is_active=FALSE), текущую
+        активную цену не трогаем.
     """
-    if not items:
-        return 0
-    cols = ", ".join(_ITEM_COLUMNS)
-    placeholders = ", ".join(["%s"] * len(_ITEM_COLUMNS))
-    sql = (
-        f"INSERT INTO price_item ({cols}) VALUES ({placeholders}) "
-        f"ON CONFLICT {_ITEM_CONFLICT} DO NOTHING"
-    )
     inserted = 0
     for item in items:
-        cur.execute(sql, tuple(getattr(item, col) for col in _ITEM_COLUMNS))
-        inserted += cur.rowcount  # 1 — вставлено, 0 — дубликат пропущен
+        inserted += _save_item_versioned(cur, item)
     return inserted
+
+
+def _save_item_versioned(cur, item) -> int:
+    if _identical_version_exists(cur, item):
+        return 0  # такая же версия уже записана — повторный прогон ничего не меняет
+
+    current = _current_active_item(cur, item)
+    if current is None:
+        item.is_active = True
+        _insert_one_item(cur, item)
+        return 1
+
+    if _is_newer_or_equal(item.effective_date, current["effective_date"]):
+        _flag_anomaly_if_big(current, item)
+        cur.execute("UPDATE price_item SET is_active = FALSE WHERE item_id = %s", (current["item_id"],))
+        item.is_active = True
+    else:
+        item.is_active = False  # более старый прайс — только в историю
+    _insert_one_item(cur, item)
+    return 1
+
+
+def _identical_version_exists(cur, item) -> bool:
+    """Есть ли уже строка с тем же ключом (партнёр+услуга+дата) и теми же ценами.
+
+    Покрывает идемпотентность и для активных, и для архивных версий, поэтому
+    повторная загрузка того же файла не плодит дубли.
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM price_item
+        WHERE partner_id = %s AND service_name_raw = %s
+          AND COALESCE(effective_date, DATE '0001-01-01') = COALESCE(%s, DATE '0001-01-01')
+          AND price_resident_kzt    IS NOT DISTINCT FROM %s
+          AND price_nonresident_kzt IS NOT DISTINCT FROM %s
+          AND price_original        IS NOT DISTINCT FROM %s
+        LIMIT 1
+        """,
+        (
+            item.partner_id,
+            item.service_name_raw,
+            item.effective_date,
+            item.price_resident_kzt,
+            item.price_nonresident_kzt,
+            item.price_original,
+        ),
+    )
+    return cur.fetchone() is not None
+
+
+def _current_active_item(cur, item) -> dict[str, Any] | None:
+    """Текущая активная версия услуги у партнёра (uq_item_active гарантирует ≤1)."""
+    cur.execute(
+        """
+        SELECT item_id, effective_date,
+               price_resident_kzt, price_nonresident_kzt, price_original
+        FROM price_item
+        WHERE partner_id = %s AND service_name_raw = %s AND is_active = TRUE
+        LIMIT 1
+        """,
+        (item.partner_id, item.service_name_raw),
+    )
+    return cur.fetchone()
+
+
+def _insert_one_item(cur, item) -> None:
+    cols = ", ".join(_ITEM_COLUMNS)
+    placeholders = ", ".join(["%s"] * len(_ITEM_COLUMNS))
+    cur.execute(
+        f"INSERT INTO price_item ({cols}) VALUES ({placeholders})",
+        tuple(getattr(item, col) for col in _ITEM_COLUMNS),
+    )
+
+
+def _flag_anomaly_if_big(current: dict[str, Any], item) -> None:
+    """ТЗ 4.4: цена отличается от предыдущей версии > 50% → флаг аномалии."""
+    ratio = _price_change_ratio(_repr_price_row(current), _repr_price_item(item))
+    if ratio is None or ratio <= _ANOMALY_THRESHOLD:
+        return
+    note = f"ценовая аномалия: изменение {ratio * 100:.0f}% относительно предыдущей версии"
+    item.verification_note = f"{item.verification_note}; {note}" if item.verification_note else note
+    item.is_verified = False  # требует ручного подтверждения оператором
+
+
+def _repr_price_item(item) -> Decimal | None:
+    return _repr_price(item.price_resident_kzt, item.price_original, item.price_nonresident_kzt)
+
+
+def _repr_price_row(row: dict[str, Any]) -> Decimal | None:
+    return _repr_price(row.get("price_resident_kzt"), row.get("price_original"), row.get("price_nonresident_kzt"))
+
+
+def _repr_price(*candidates) -> Decimal | None:
+    for price in candidates:
+        if price is not None:
+            return Decimal(str(price))
+    return None
+
+
+def _price_change_ratio(old: Decimal | None, new: Decimal | None) -> Decimal | None:
+    if old is None or new is None or old == 0:
+        return None
+    return abs(new - old) / abs(old)
+
+
+def _is_newer_or_equal(new_date, current_date) -> bool:
+    """Новее ли (или равна по дате) пришедшая цена. None трактуем как «нет даты»:
+    датированная цена считается новее недатированной, две недатированные — равны."""
+    if new_date is None and current_date is None:
+        return True
+    if new_date is None:
+        return False
+    if current_date is None:
+        return True
+    return new_date >= current_date
 
 
 def save(payload: dict) -> dict:

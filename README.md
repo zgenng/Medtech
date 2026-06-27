@@ -58,6 +58,18 @@ export DATABASE_URL="postgresql://user:pass@host:5433/dbname"
 | POST | `/items` | Парсер кладёт извлечённую позицию прайса |
 | GET | `/stats` | Метрики для дашборда (% нормализации, статусы) |
 
+## Обработка цен (ТЗ 4.4 / 5)
+- **Конвертация валют.** Парсеры угадывают валюту прайса (`utils/currency.detect_currency`),
+  и при загрузке цены приводятся к KZT (`apply_currency_conversion`), а оригинал
+  сохраняется в `price_original` + `currency_original`. Курсы — в `ParserConfig.currency_rates`
+  (по умолчанию `utils/currency.DEFAULT_RATES`).
+- **Версионирование.** Одна активная версия услуги у партнёра (индекс `uq_item_active`).
+  Новая цена → старая версия архивируется (`is_active=FALSE`, история не удаляется),
+  новая становится активной. Более старый прайс кладётся в историю, не трогая текущую цену.
+- **Аномалия цены.** Изменение > 50% относительно предыдущей версии помечается в
+  `verification_note` и снимает `is_verified` → позиция уходит на ручное подтверждение.
+- Применить версионирование к существующей БД: `psql "$DATABASE_URL" -f sql/migrations/002_price_versioning.sql`.
+
 ## Контракт для команды
 - **Парсеры** → шлют `POST /items` объектами `PriceItemIn` (см. `models.py`).
 - **Нормализатор** → проставляет `service_id` и `match_confidence` у `price_item`
