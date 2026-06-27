@@ -9,6 +9,15 @@ from contextlib import contextmanager
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 
+# Подхватываем .env, если установлен python-dotenv (чтобы DATABASE_URL читался
+# одинаково из CLI, uvicorn и PyCharm). Без пакета просто используем os.environ.
+try:  # pragma: no cover - зависит от окружения
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://arman@localhost:5433/arman",

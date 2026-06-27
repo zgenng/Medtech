@@ -14,6 +14,7 @@ sentence-transformers>=2.2.0 # семантические эмбеддинги L
 numpy>=1.24.0                # косинусная близость эмбеддингов
 # Доступ к БД (repository.py / db.py)
 psycopg[binary,pool]>=3.1.0
+python-dotenv>=1.0.0         # чтение DATABASE_URL из .env (db.py)
 
 # --- REST API (main.py, этап 4) ---
 fastapi>=0.110.0
