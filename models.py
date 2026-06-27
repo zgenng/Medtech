@@ -34,6 +34,7 @@ class PriceDocument:
     parse_status: str = "pending"
     parse_log: str = ""
     raw_content: str = ""
+    file_path: str | None = None
     doc_id: str = field(default_factory=new_id)
     parsed_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -44,6 +45,8 @@ class PriceItem:
     partner_id: str
     service_name_raw: str
     service_code_source: str | None = None
+    service_id: str | None = None
+    match_confidence: Decimal | None = None
     price_resident_kzt: Decimal | None = None
     price_nonresident_kzt: Decimal | None = None
     price_original: Decimal | None = None
