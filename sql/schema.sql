@@ -111,6 +111,12 @@ CREATE INDEX IF NOT EXISTS idx_partner_city   ON partner(city);
 -- Уникальность для дедупликации позиций
 -- (та же клиника + та же услуга + та же дата = дубликат)
 -- ============================================================
+-- COALESCE-сентинел: позиции без даты (effective_date IS NULL) тоже дедуплицируются
+-- (обычный UNIQUE считает NULL != NULL и плодил бы дубли при повторном прогоне).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_item_dedup
-    ON price_item(partner_id, service_name_raw, effective_date)
+    ON price_item(partner_id, service_name_raw, (COALESCE(effective_date, DATE '0001-01-01')))
     WHERE is_active = TRUE;
+
+-- Идемпотентность документа: один файл одной клиники = один price_document.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_document_file
+    ON price_document(partner_id, file_name);

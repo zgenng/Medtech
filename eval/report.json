@@ -1,0 +1,13 @@
+{
+  "total": 24,
+  "positives": 21,
+  "negatives": 3,
+  "auto_matched": 21,
+  "auto_correct": 21,
+  "review_band": 0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "accuracy": 1.0,
+  "auto_match_rate": 0.875
+}

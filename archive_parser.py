@@ -33,6 +33,7 @@ class ArchiveParser:
             result = self.factory.for_path(path).parse(path, partner)
         except Exception as error:
             result = self._error_result(path, partner, error)
+        result.document.file_path = str(path)
         result.warnings.extend(validate_items(result.items))
         return result.finalize()
 
@@ -67,6 +68,7 @@ class ArchiveParser:
 
     def _error_result(self, path: Path, partner: Partner, error: Exception) -> ParseResult:
         document = self.factory.for_path(path).make_document(path, partner)
+        document.file_path = str(path)
         result = ParseResult(document=document)
         result.errors.append(str(error))
         return result.finalize()
