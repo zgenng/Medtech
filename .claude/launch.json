@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "medarchive",
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["main:app", "--reload", "--port", "8011"],
+      "port": 8011
+    }
+  ]
+}

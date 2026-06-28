@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MedArchive — консоль оператора</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Боковая навигация -->
+    <aside class="rail">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">▦</div>
+        <div class="brand-text">
+          <strong>MedArchive</strong>
+          <span>консоль оператора</span>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item is-active" data-view="dashboard">
+          <span class="nav-ic">◴</span><span class="nav-label">Дашборд</span>
+        </button>
+        <button class="nav-item" data-view="search">
+          <span class="nav-ic">⌕</span><span class="nav-label">Поиск услуги</span>
+        </button>
+        <button class="nav-item" data-view="partners">
+          <span class="nav-ic">⊞</span><span class="nav-label">Партнёры</span>
+        </button>
+        <button class="nav-item" data-view="match">
+          <span class="nav-ic">⇄</span><span class="nav-label">Сопоставление</span>
+          <span class="nav-badge" data-badge="unmatched">0</span>
+        </button>
+        <button class="nav-item" data-view="review">
+          <span class="nav-ic">✓</span><span class="nav-label">Верификация</span>
+          <span class="nav-badge nav-badge--warn" data-badge="unverified">0</span>
+        </button>
+        <button class="nav-item" data-view="upload">
+          <span class="nav-ic">⤓</span><span class="nav-label">Загрузка архива</span>
+        </button>
+      </nav>
+
+      <div class="rail-foot">
+        <button class="ghost-btn" id="refresh">⟳ Обновить</button>
+        <a class="ghost-btn" href="/docs" target="_blank" rel="noopener">API · Swagger ↗</a>
+        <span class="db-dot" id="dbdot" title="Состояние API">●</span>
+      </div>
+    </aside>
+
+    <main class="stage" id="stage">
+      <!-- ── ДАШБОРД ───────────────────────────────────── -->
+      <section class="view is-active" data-view="dashboard">
+        <header class="view-head">
+          <div>
+            <p class="eyebrow">Сводка по архиву</p>
+            <h1>Дашборд обработки</h1>
+          </div>
+        </header>
+        <div class="stat-grid" id="statGrid"></div>
+        <div class="panel-row">
+          <div class="panel">
+            <h2 class="panel-title">Документы по статусу</h2>
+            <div id="docStatus" class="status-bars"></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Здоровье нормализации</h2>
+            <div id="normHealth" class="norm-health"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── ПОИСК ─────────────────────────────────────── -->
+      <section class="view" data-view="search">
+        <header class="view-head">
+          <div>
+            <p class="eyebrow">Кто оказывает услугу и по какой цене</p>
+            <h1>Поиск услуги</h1>
+          </div>
+        </header>
+        <div class="searchbar">
+          <span class="searchbar-ic">⌕</span>
+          <input id="searchInput" type="search" placeholder="Например: МРТ головного мозга, УЗИ, приём терапевта…" autocomplete="off" />
+        </div>
+        <div id="searchResults" class="search-results"></div>
+      </section>
+
+      <!-- ── ПАРТНЁРЫ ──────────────────────────────────── -->
+      <section class="view" data-view="partners">
+        <header class="view-head">
+          <div>
+            <p class="eyebrow">Клиники-партнёры</p>
+            <h1>Партнёры</h1>
+          </div>
+        </header>
+        <div class="split">
+          <div class="split-list" id="partnerList"></div>
+          <div class="split-detail" id="partnerDetail">
+            <div class="empty">
+              <div class="empty-mark">⊞</div>
+              <p>Выберите партнёра, чтобы открыть прайс, контакты и дату актуальности.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── СОПОСТАВЛЕНИЕ (unmatched) ─────────────────── -->
+      <section class="view" data-view="match">
+        <header class="view-head">
+          <div>
+            <p class="eyebrow">Очередь несопоставленных позиций · ручная разметка</p>
+            <h1>Сопоставление</h1>
+          </div>
+          <div class="head-meta" id="matchMeta"></div>
+        </header>
+        <div id="matchQueue" class="ledger"></div>
+      </section>
+
+      <!-- ── ВЕРИФИКАЦИЯ (review) ──────────────────────── -->
+      <section class="view" data-view="review">
+        <header class="view-head">
+          <div>
+            <p class="eyebrow">Подтверждение цен и сопоставлений</p>
+            <h1>Верификация</h1>
+          </div>
+          <div class="head-meta" id="reviewMeta"></div>
+        </header>
+        <div id="reviewQueue" class="ledger"></div>
+      </section>
+
+      <!-- ── ЗАГРУЗКА ──────────────────────────────────── -->
+      <section class="view" data-view="upload">
+        <header class="view-head">
+          <div>
+            <p class="eyebrow">Административный раздел</p>
+            <h1>Загрузка архива</h1>
+          </div>
+        </header>
+        <div class="panel-row">
+          <div class="panel">
+            <h2 class="panel-title">Новый ZIP-архив прайсов</h2>
+            <label class="dropzone" id="dropzone">
+              <input type="file" id="fileInput" accept=".zip" hidden />
+              <span class="dz-mark">⤓</span>
+              <span class="dz-title" id="dzTitle">Перетащите ZIP или нажмите, чтобы выбрать</span>
+              <span class="dz-hint">PDF · DOCX · XLSX · сканы — определятся автоматически</span>
+            </label>
+            <label class="check"><input type="checkbox" id="normChk" checked /> Нормализовать после загрузки</label>
+            <button class="primary-btn" id="uploadBtn" disabled>Обработать архив</button>
+            <div id="uploadResult" class="upload-result"></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Целевой справочник услуг</h2>
+            <div class="catalog-stat" id="catalogStat"></div>
+            <label class="dropzone dropzone--sm" id="catDropzone">
+              <input type="file" id="catInput" accept=".xlsx,.xls" hidden />
+              <span class="dz-mark">▦</span>
+              <span class="dz-title" id="catTitle">Загрузить справочник (XLSX)</span>
+              <span class="dz-hint">колонки Name_ru · Специальность · Code · TarificatrCode</span>
+            </label>
+            <button class="primary-btn" id="catBtn" disabled>Загрузить справочник</button>
+            <div id="catResult" class="upload-result"></div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2 class="panel-title">Статус обработки документов</h2>
+          <div id="docTable" class="doc-table"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Модал выбора услуги из справочника -->
+  <div class="modal" id="pickerModal" hidden>
+    <div class="modal-card">
+      <header class="modal-head">
+        <h3>Выбор услуги из справочника</h3>
+        <button class="icon-btn" id="pickerClose">✕</button>
+      </header>
+      <div class="searchbar searchbar--sm">
+        <span class="searchbar-ic">⌕</span>
+        <input id="pickerInput" type="search" placeholder="Поиск по справочнику услуг…" autocomplete="off" />
+      </div>
+      <div id="pickerList" class="picker-list"></div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

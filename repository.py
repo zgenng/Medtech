@@ -35,6 +35,53 @@ def load_services() -> list[dict[str, Any]]:
     return rows
 
 
+def upsert_services(records: Iterable[Any]) -> dict[str, int]:
+    """Загрузить целевой справочник услуг (ТЗ 2.2) в таблицу service.
+
+    Апсерт по имени услуги (uq_service_name): дубли названий из справочника
+    схлопываются в одну запись. Синонимы оператора при обновлении НЕ затираются —
+    обновляются только специальность/код/тарификатор. Возвращает счётчики.
+    """
+    rows = []
+    seen: set[str] = set()
+    for r in records:
+        name = (getattr(r, "service_name", None) or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        specialty = getattr(r, "category", None) or getattr(r, "specialty", None)
+        synonyms = getattr(r, "synonyms", None) or []
+        rows.append((
+            name,
+            json.dumps(list(synonyms), ensure_ascii=False),
+            specialty,                      # category = специальность
+            specialty,                      # specialty
+            getattr(r, "code", None),
+            getattr(r, "tarificator_code", None),
+        ))
+    if not rows:
+        return {"received": 0, "inserted": 0, "updated": 0}
+
+    sql = """
+        INSERT INTO service (service_name, synonyms, category, specialty, code, tarificator_code, is_active)
+        VALUES (%s, %s::jsonb, %s, %s, %s, %s, TRUE)
+        ON CONFLICT (service_name) DO UPDATE SET
+            category         = EXCLUDED.category,
+            specialty        = EXCLUDED.specialty,
+            code             = EXCLUDED.code,
+            tarificator_code = EXCLUDED.tarificator_code,
+            is_active        = TRUE
+        RETURNING (xmax = 0) AS inserted
+    """
+    inserted = 0
+    with _cursor() as cur:
+        for row in rows:
+            cur.execute(sql, row)
+            if cur.fetchone()["inserted"]:
+                inserted += 1
+    return {"received": len(rows), "inserted": inserted, "updated": len(rows) - inserted}
+
+
 def iter_unmatched(limit: int | None = None) -> Iterator[dict[str, Any]]:
     """Позиции прайса без сопоставления (service_id IS NULL)."""
     sql = """
@@ -95,7 +142,7 @@ def trgm_candidates(name: str, limit: int = 50, category: str | None = None) -> 
                similarity(service_name, %s) AS sim
         FROM service
         WHERE is_active = TRUE
-          AND (%s IS NULL OR category = %s)
+          AND (%s::text IS NULL OR category = %s::text)
           AND service_name %% %s
         ORDER BY sim DESC
         LIMIT %s
@@ -382,6 +429,7 @@ def save(payload: dict) -> dict:
                 for item in doc_items:
                     item.partner_id = db_partner_id
                     item.doc_id = db_doc_id
+                    _sanitize_prices(item)
                 report["items_inserted"] += _bulk_insert_items(cur, doc_items)
             report["documents_saved"] += 1
         except Exception as exc:  # noqa: BLE001 — фиксируем и идём дальше по архиву
@@ -389,6 +437,27 @@ def save(payload: dict) -> dict:
             report["errors"].append(f"{document.file_name}: {exc}")
             _mark_document_error(document, src_partner, str(exc))
     return report
+
+
+# Предел NUMERIC(14,2): |цена| < 10^12. Значения выше — артефакт парсинга
+# (склейка чисел, кривая конвертация). Обнуляем с пометкой, чтобы один битый
+# ряд не валил весь документ, а позиция ушла на ручную проверку.
+_MAX_PRICE = Decimal("10") ** 12
+
+
+def _sanitize_prices(item) -> None:
+    flagged = []
+    for field in ("price_resident_kzt", "price_nonresident_kzt", "price_original"):
+        value = getattr(item, field, None)
+        if value is not None and abs(Decimal(str(value))) >= _MAX_PRICE:
+            setattr(item, field, None)
+            flagged.append(field)
+    if flagged:
+        item.is_verified = False
+        note = f"цена вне диапазона, обнулена: {', '.join(flagged)}"
+        item.verification_note = (
+            f"{item.verification_note}; {note}" if getattr(item, "verification_note", None) else note
+        )
 
 
 def _mark_document_error(document, src_partner, message: str) -> None:
@@ -545,7 +614,9 @@ def stats() -> dict[str, Any]:
             SELECT
                 count(*) FILTER (WHERE is_active)                                  AS items_total,
                 count(*) FILTER (WHERE is_active AND service_id IS NOT NULL)        AS items_matched,
-                count(*) FILTER (WHERE is_active AND service_id IS NULL)            AS items_unmatched
+                count(*) FILTER (WHERE is_active AND service_id IS NULL)            AS items_unmatched,
+                count(*) FILTER (WHERE is_active AND service_id IS NOT NULL
+                                     AND NOT is_verified)                          AS items_unverified
             FROM price_item
             """
         )
@@ -560,5 +631,89 @@ def stats() -> dict[str, Any]:
         "items_total": total,
         "items_matched": matched,
         "items_unmatched": items["items_unmatched"] or 0,
+        "items_unverified": items["items_unverified"] or 0,
         "auto_match_pct": round(100 * matched / total, 1) if total else 0.0,
     }
+
+
+# ============================================================
+# Очередь верификации и статус обработки (ТЗ 4.4 / 4.6) — для оператора
+# ============================================================
+
+
+def review_queue(limit: int = 100) -> list[dict[str, Any]]:
+    """Позиции на ручную верификацию: сопоставлены, но не подтверждены.
+
+    Сначала идут ценовые аномалии и низкая уверенность (verification_note задан
+    или match_confidence < 0.85) — оператор видит самое важное сверху.
+    """
+    sql = """
+        SELECT pi.item_id, pi.service_name_raw, pi.service_id, s.service_name,
+               p.partner_id, p.name AS partner_name, p.city,
+               pi.price_resident_kzt, pi.price_nonresident_kzt,
+               pi.price_original, pi.currency_original,
+               pi.effective_date, pi.match_confidence, pi.verification_note
+        FROM price_item pi
+        JOIN service s ON s.service_id = pi.service_id
+        LEFT JOIN partner p ON p.partner_id = pi.partner_id
+        WHERE pi.is_active = TRUE
+          AND pi.service_id IS NOT NULL
+          AND pi.is_verified = FALSE
+        ORDER BY (pi.verification_note IS NOT NULL) DESC,
+                 pi.match_confidence ASC NULLS FIRST,
+                 pi.created_at
+        LIMIT %s
+    """
+    with _cursor() as cur:
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+    for row in rows:
+        row["item_id"] = str(row["item_id"])
+        row["service_id"] = str(row["service_id"]) if row["service_id"] else None
+        row["partner_id"] = str(row["partner_id"]) if row["partner_id"] else None
+    return rows
+
+
+def set_verification(item_id: str, verified: bool, note: str | None = None) -> None:
+    """Подтвердить/отклонить позицию. При отклонении снимаем сопоставление."""
+    with _cursor() as cur:
+        if verified:
+            cur.execute(
+                """
+                UPDATE price_item
+                SET is_verified = TRUE, verification_note = %s
+                WHERE item_id = %s
+                """,
+                (note, item_id),
+            )
+        else:
+            # Отклонение: услуга была сопоставлена неверно — вернуть в unmatched.
+            cur.execute(
+                """
+                UPDATE price_item
+                SET is_verified = FALSE, service_id = NULL, match_confidence = NULL,
+                    verification_note = %s
+                WHERE item_id = %s
+                """,
+                (note or "отклонено оператором", item_id),
+            )
+
+
+def list_documents(limit: int = 100) -> list[dict[str, Any]]:
+    """Статус обработки прайс-документов для админ-раздела (ТЗ 4.6)."""
+    sql = """
+        SELECT d.doc_id, d.file_name, d.file_format, d.parse_status,
+               d.effective_date, d.parsed_at, p.name AS partner_name,
+               (SELECT count(*) FROM price_item pi
+                  WHERE pi.doc_id = d.doc_id AND pi.is_active) AS items
+        FROM price_document d
+        LEFT JOIN partner p ON p.partner_id = d.partner_id
+        ORDER BY d.created_at DESC
+        LIMIT %s
+    """
+    with _cursor() as cur:
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+    for row in rows:
+        row["doc_id"] = str(row["doc_id"])
+    return rows

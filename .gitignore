@@ -9,6 +9,9 @@ __pycache__/
 # OS
 .DS_Store
 
+# Локальные настройки Claude Code (не командные)
+.claude/settings.local.json
+
 # Оригиналы прайсов / загруженные архивы (хранятся отдельно)
 uploads/
 *.zip

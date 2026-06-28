@@ -42,11 +42,36 @@ class XlsxParser(BaseParser):
     def _ensure_xlsx(self, path: Path, result: ParseResult) -> Path | None:
         if path.suffix.lower() == ".xlsx":
             return path
-        converted = self._convert_xls_with_libreoffice(path)
+        # Старый бинарный .xls: сначала пробуем xlrd (чистый Python, в зависимостях),
+        # затем — LibreOffice как тяжёлый фолбэк.
+        converted = self._convert_xls_with_xlrd(path) or self._convert_xls_with_libreoffice(path)
         if converted:
             return converted
         result.errors.append("Cannot read .xls: install xlrd or LibreOffice")
         return None
+
+    @staticmethod
+    def _convert_xls_with_xlrd(path: Path) -> Path | None:
+        """Прочитать .xls через xlrd и пересохранить в .xlsx для общего пути парсинга."""
+        try:
+            import xlrd
+            from openpyxl import Workbook
+        except ImportError:
+            return None
+        try:
+            book = xlrd.open_workbook(str(path))
+        except Exception:
+            return None
+        out_wb = Workbook()
+        out_wb.remove(out_wb.active)
+        for sheet in book.sheets():
+            ws = out_wb.create_sheet(title=(sheet.name or "Sheet")[:31])
+            for r in range(sheet.nrows):
+                ws.append([sheet.cell_value(r, c) for c in range(sheet.ncols)])
+        temp_dir = Path(tempfile.mkdtemp(prefix="medarchive_xls_"))
+        output = temp_dir / f"{path.stem}.xlsx"
+        out_wb.save(output)
+        return output
 
     @staticmethod
     def _convert_xls_with_libreoffice(path: Path) -> Path | None:

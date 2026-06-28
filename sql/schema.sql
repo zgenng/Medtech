@@ -26,13 +26,21 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- 3.4  Услуга справочника (Service) — целевой справочник
 -- ============================================================
 CREATE TABLE IF NOT EXISTS service (
-    service_id    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    service_name  TEXT NOT NULL,
-    synonyms      JSONB NOT NULL DEFAULT '[]'::jsonb,  -- ["синоним1", "синоним2"]
-    category      TEXT,                                 -- лаборатория / диагностика / консультация / процедура
-    icd_code      TEXT,                                 -- код по МКБ (опционально)
-    is_active     BOOLEAN NOT NULL DEFAULT TRUE
+    service_id       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    service_name     TEXT NOT NULL,
+    synonyms         JSONB NOT NULL DEFAULT '[]'::jsonb,  -- ["синоним1", "синоним2"]
+    category         TEXT,                                 -- категория/специальность услуги
+    icd_code         TEXT,                                 -- код по МКБ (опционально)
+    specialty        TEXT,                                 -- "Специальность" из справочника организаторов
+    code             TEXT,                                 -- "Code" из справочника
+    tarificator_code TEXT,                                 -- "TarificatrCode" (напр. A02.004.000)
+    is_active        BOOLEAN NOT NULL DEFAULT TRUE
 );
+
+-- Имя услуги уникально — естественный ключ загрузчика справочника (ТЗ 2.2).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_name ON service(service_name);
+CREATE INDEX IF NOT EXISTS idx_service_specialty ON service(specialty);
+CREATE INDEX IF NOT EXISTS idx_service_tarif      ON service(tarificator_code);
 
 -- ============================================================
 -- 3.1  Партнёр (Partner) — клиника
